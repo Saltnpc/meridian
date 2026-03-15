@@ -1,0 +1,191 @@
+# Meridian
+
+**Autonomous Meteora DLMM liquidity management agent for Solana, powered by LLMs.**
+
+---
+
+## What it does
+
+- **Screens pools** — continuously scans Meteora DLMM pools against configurable thresholds (fee/TVL ratio, organic score, holder count, market cap, bin step, etc.) to surface high-quality opportunities
+- **Manages positions** — opens, monitors, and closes LP positions autonomously; decides to STAY, CLOSE, or REDEPLOY based on live PnL, yield, and range data
+- **Claims fees** — tracks unclaimed fees per position and claims when thresholds are met
+- **Learns from performance** — studies top LPers in target pools, saves structured lessons, and evolves screening thresholds based on closed position history
+- **Telegram notifications** — sends cycle summaries and out-of-range alerts to your Telegram chat
+
+---
+
+## How it works
+
+Meridian runs a **ReAct agent loop** — each cycle the LLM reasons over live data, calls tools, and acts. Two specialized agents run on independent cron schedules:
+
+| Agent | Default interval | Role |
+|---|---|---|
+| **Hunter Alpha** | Every 30 min | Pool screening — finds and deploys into the best candidate |
+| **Healer Alpha** | Every 10 min | Position management — evaluates each open position and acts |
+
+A third **health check** runs hourly to summarize portfolio state.
+
+**Data sources used by the agents:**
+- `@meteora-ag/dlmm` SDK — on-chain position data, active bin, deploy/close transactions
+- Meteora DLMM PnL API — position yield, fee accrual, PnL
+- Wallet RPC — SOL and token balances
+- Pool screening API — fee/TVL ratios, volume, organic scores, holder counts
+
+Agents are powered via **OpenRouter** and can be swapped for any compatible model by changing `managementModel` / `screeningModel` in `user-config.json`.
+
+---
+
+## Requirements
+
+- Node.js 18+
+- [OpenRouter](https://openrouter.ai) API key
+- Solana wallet (base58 private key)
+- Telegram bot token (optional, for notifications)
+
+---
+
+## Setup
+
+**1. Clone the repo**
+
+```bash
+git clone <repo-url>
+cd dlmm-agent
+```
+
+**2. Install dependencies**
+
+```bash
+npm install
+```
+
+**3. Create `.env`**
+
+```bash
+OPENROUTER_API_KEY=sk-or-...
+TELEGRAM_BOT_TOKEN=123456:ABC...    # optional
+```
+
+**4. Configure your wallet and RPC**
+
+```bash
+cp user-config.example.json user-config.json
+```
+
+Edit `user-config.json` and set at minimum:
+
+```json
+{
+  "walletKey": "YOUR_BASE58_PRIVATE_KEY",
+  "rpcUrl": "https://your-rpc-endpoint"
+}
+```
+
+**5. Run**
+
+```bash
+npm run dev    # dry run — no on-chain transactions
+npm start      # live mode
+```
+
+On startup Meridian fetches your wallet balance, open positions, and the top pool candidates, then begins autonomous cycles immediately.
+
+---
+
+## Config reference
+
+All fields are optional — defaults shown. Edit `user-config.json`.
+
+| Field | Default | Description |
+|---|---|---|
+| `walletKey` | — | Base58-encoded private key of the trading wallet |
+| `rpcUrl` | — | Solana RPC endpoint URL |
+| `dryRun` | `true` | Simulate all transactions without submitting |
+| `deployAmountSol` | `0.5` | SOL to deploy per new position |
+| `maxPositions` | `3` | Maximum concurrent open positions |
+| `minSolToOpen` | `0.07` | Minimum wallet SOL balance before opening a new position |
+| `managementIntervalMin` | `10` | How often the management agent runs (minutes) |
+| `screeningIntervalMin` | `30` | How often the screening agent runs (minutes) |
+| `managementModel` | `openrouter/healer-alpha` | LLM model for position management |
+| `screeningModel` | `openrouter/hunter-alpha` | LLM model for pool screening |
+| `generalModel` | `openrouter/healer-alpha` | LLM model for REPL chat and `/learn` |
+| `minFeeActiveTvlRatio` | `0.05` | Minimum fee/active-TVL ratio (5%) |
+| `minTvl` | `10000` | Minimum pool TVL in USD |
+| `maxTvl` | `150000` | Maximum pool TVL in USD |
+| `minOrganic` | `65` | Minimum organic score (0–100) |
+| `minHolders` | `500` | Minimum token holder count |
+| `timeframe` | `5m` | Candle timeframe used in screening |
+| `category` | `trending` | Pool category filter for screening |
+| `takeProfitFeePct` | `5` | Close position when unclaimed fees reach this % of deployed capital |
+| `outOfRangeWaitMinutes` | `30` | Minutes a position can be out of range before alerting / acting |
+
+---
+
+## REPL commands
+
+After startup, an interactive prompt is available. The prompt shows a live countdown to the next management and screening cycle.
+
+```
+[manage: 8m 12s | screen: 24m 3s]
+>
+```
+
+| Command | Description |
+|---|---|
+| `1`, `2`, `3` ... | Deploy into that numbered pool from the current candidates list |
+| `auto` | Let the agent pick the best pool and deploy automatically |
+| `/status` | Refresh and display wallet balance and open positions |
+| `/candidates` | Re-screen and display the current top pool candidates |
+| `/learn` | Study top LPers across all current candidate pools and save lessons |
+| `/learn <pool_address>` | Study top LPers from a specific pool address |
+| `/thresholds` | Show current screening thresholds and closed-position performance stats |
+| `/evolve` | Trigger threshold evolution from performance data (requires 5+ closed positions) |
+| `/stop` | Graceful shutdown |
+| `<anything else>` | Free-form chat — ask the agent questions, request actions, analyze pools |
+
+Free-form chat persists session history (last 10 exchanges), so you can have a continuous conversation: `"what do you think of pool #2?"`, `"close all positions"`, `"how much have we earned today?"`.
+
+---
+
+## Telegram
+
+**Setup:**
+
+1. Create a bot via [@BotFather](https://t.me/BotFather) and copy the token
+2. Add `TELEGRAM_BOT_TOKEN=<token>` to your `.env`
+3. Start the agent, then send **any message** to your bot
+
+On first message, the agent auto-registers your chat ID and begins sending notifications. No manual chat ID configuration needed.
+
+**Notifications sent:**
+- After every management cycle: position count and SOL balance
+- After every screening cycle: same summary
+- When a position has been out of range for `outOfRangeWaitMinutes` or longer
+
+You can also send commands to the agent via Telegram using the same free-form chat interface as the REPL — the agent will respond with its findings.
+
+---
+
+## How it learns
+
+Meridian accumulates structured knowledge in `lessons.json` with two components:
+
+### Lessons (`/learn`)
+
+Running `/learn` triggers the agent to call `study_top_lpers` on each top candidate pool. It analyzes the on-chain behavior of the best-performing LPs in those pools — hold duration, entry/exit timing, scalping vs. holding patterns, win rates — and saves 4–8 concrete, actionable lessons. Cross-pool patterns are weighted more heavily since they generalize better.
+
+Saved lessons are injected into subsequent agent cycles as part of the system context, improving decision quality over time.
+
+### Threshold evolution (`/evolve`)
+
+After at least 5 positions have been closed, `/evolve` analyzes the performance record (win rate, average PnL, fee yields) and adjusts the screening thresholds in `user-config.json` accordingly. Changes take effect immediately — no restart needed. The rationale for each change is printed to the console.
+
+Use `/thresholds` to see current values alongside performance stats.
+
+---
+
+## Disclaimer
+
+This software is provided as-is, with no warranty. Running an autonomous trading agent carries real financial risk — you can lose funds. Always start with `npm run dev` (dry run) to verify behavior before going live. Never deploy more capital than you can afford to lose. This is not financial advice.
+
+The authors are not responsible for any losses incurred through use of this software.
