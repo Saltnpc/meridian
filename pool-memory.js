@@ -136,6 +136,89 @@ export function getPoolMemory({ pool_address }) {
 }
 
 /**
+ * Record a live position snapshot during a management cycle.
+ * Builds a trend dataset while position is still open — not just at close.
+ * Keeps last 48 snapshots per pool (~4h at 5min intervals).
+ */
+export function recordPositionSnapshot(poolAddress, snapshot) {
+  if (!poolAddress) return;
+  const db = load();
+
+  if (!db[poolAddress]) {
+    db[poolAddress] = {
+      name: snapshot.pair || poolAddress.slice(0, 8),
+      base_mint: null,
+      deploys: [],
+      total_deploys: 0,
+      avg_pnl_pct: 0,
+      win_rate: 0,
+      last_deployed_at: null,
+      last_outcome: null,
+      notes: [],
+      snapshots: [],
+    };
+  }
+
+  if (!db[poolAddress].snapshots) db[poolAddress].snapshots = [];
+
+  db[poolAddress].snapshots.push({
+    ts: new Date().toISOString(),
+    position: snapshot.position,
+    pnl_pct: snapshot.pnl_pct ?? null,
+    pnl_usd: snapshot.pnl_usd ?? null,
+    in_range: snapshot.in_range ?? null,
+    unclaimed_fees_usd: snapshot.unclaimed_fees_usd ?? null,
+    minutes_out_of_range: snapshot.minutes_out_of_range ?? null,
+    age_minutes: snapshot.age_minutes ?? null,
+  });
+
+  // Keep last 48 snapshots (~4h at 5min intervals)
+  if (db[poolAddress].snapshots.length > 48) {
+    db[poolAddress].snapshots = db[poolAddress].snapshots.slice(-48);
+  }
+
+  save(db);
+}
+
+/**
+ * Recall focused context for a specific pool — used before screening or management.
+ * Returns a short formatted string ready for injection into the agent goal.
+ */
+export function recallForPool(poolAddress) {
+  if (!poolAddress) return null;
+  const db = load();
+  const entry = db[poolAddress];
+  if (!entry) return null;
+
+  const lines = [];
+
+  // Deploy history summary
+  if (entry.total_deploys > 0) {
+    lines.push(`POOL MEMORY [${entry.name}]: ${entry.total_deploys} past deploy(s), avg PnL ${entry.avg_pnl_pct}%, win rate ${entry.win_rate}%, last outcome: ${entry.last_outcome}`);
+  }
+
+  // Recent snapshot trend (last 6 = ~30min)
+  const snaps = (entry.snapshots || []).slice(-6);
+  if (snaps.length >= 2) {
+    const first = snaps[0];
+    const last = snaps[snaps.length - 1];
+    const pnlTrend = last.pnl_pct != null && first.pnl_pct != null
+      ? (last.pnl_pct - first.pnl_pct).toFixed(2)
+      : null;
+    const oorCount = snaps.filter(s => s.in_range === false).length;
+    lines.push(`RECENT TREND: PnL drift ${pnlTrend !== null ? (pnlTrend >= 0 ? "+" : "") + pnlTrend + "%" : "unknown"} over last ${snaps.length} cycles, OOR in ${oorCount}/${snaps.length} cycles`);
+  }
+
+  // Notes
+  if (entry.notes?.length > 0) {
+    const lastNote = entry.notes[entry.notes.length - 1];
+    lines.push(`NOTE: ${lastNote.note}`);
+  }
+
+  return lines.length > 0 ? lines.join("\n") : null;
+}
+
+/**
  * Tool handler: add_pool_note
  * Agent can annotate a pool with a freeform note.
  */

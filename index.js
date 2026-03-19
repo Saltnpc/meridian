@@ -13,6 +13,7 @@ import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isE
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
+import { recordPositionSnapshot, recallForPool } from "./pool-memory.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -102,8 +103,18 @@ function startCronJobs() {
     log("cron", `Starting management cycle [model: ${config.llm.managementModel}]`);
     let mgmtReport = null;
     try {
+      // Snapshot all open positions into pool-memory for trend tracking
+      const livePositions = await getMyPositions().catch(() => null);
+      const memoryContext = [];
+      for (const p of livePositions?.positions || []) {
+        recordPositionSnapshot(p.pool, p);
+        const recall = recallForPool(p.pool);
+        if (recall) memoryContext.push(recall);
+      }
+
       const { content } = await agentLoop(`
 MANAGEMENT CYCLE
+${memoryContext.length > 0 ? `\nPOOL CONTEXT (from memory):\n${memoryContext.join("\n")}\n` : ""}
 
 HARD CLOSE RULES — check in order, first match closes immediately, no further analysis:
 1. Position has an instruction AND condition is met → CLOSE (user override, highest priority)
@@ -191,13 +202,22 @@ Apply these criteria during token selection and deployment:
 Deviate from this strategy only if the token clearly doesn't match — explain why in your report.
 ` : `No active strategy set — use default bid_ask with standard settings.`;
 
+      // Pre-load pool memory for top candidates to inject into screening goal
+      const topCandidates = await getTopCandidates({ limit: 5 }).catch(() => null);
+      const candidateMemory = [];
+      for (const pool of topCandidates?.pools || []) {
+        const recall = recallForPool(pool.pool);
+        if (recall) candidateMemory.push(recall);
+      }
+
       const { content } = await agentLoop(`
 SCREENING CYCLE — DEPLOY ONLY
 ${strategyBlock}
+${candidateMemory.length > 0 ? `\nPOOL MEMORY (pre-loaded for top candidates):\n${candidateMemory.join("\n")}\n` : ""}
 1. get_my_positions first. Only proceed if positions < ${config.risk.maxPositions}.
 2. get_wallet_balance. Proceed if SOL >= ${config.management.minSolToOpen}.
 3. get_top_candidates, pick the best one, and call study_top_lpers.
-4. Call get_pool_memory for the chosen pool. If it has a bad track record (losing avg_pnl_pct, low win_rate), skip and try next candidate.
+4. Pool memory is already injected above — use it to skip pools with bad track records. Still call get_pool_memory for full history if needed.
 5. Call check_smart_wallets_on_pool for the chosen pool.
    - Smart wallets present → strong confidence boost, proceed to deploy.
    - For ALL pools (smart wallets or not): call get_token_holders (base mint) and check global_fees_sol.
